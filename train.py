@@ -653,13 +653,15 @@ def validate_flow_with_gt(val_loader, disp_net, pose_net, mask_net, flow_net, ep
     poses = np.zeros(((len(val_loader)-1) * 1 * (args.sequence_length-1),6))
 
     for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv, flow_gt, obj_map_gt) in enumerate(val_loader):
-        tgt_img_var = Variable(tgt_img.cuda(), volatile=True)
-        ref_imgs_var = [Variable(img.cuda(), volatile=True) for img in ref_imgs]
-        intrinsics_var = Variable(intrinsics.cuda(), volatile=True)
-        intrinsics_inv_var = Variable(intrinsics_inv.cuda(), volatile=True)
 
-        flow_gt_var = Variable(flow_gt.cuda(), volatile=True)
-        obj_map_gt_var = Variable(obj_map_gt.cuda(), volatile=True)
+        with torch.no_grad():
+            tgt_img_var = Variable(tgt_img.cuda())
+            ref_imgs_var = [Variable(img.cuda()) for img in ref_imgs]
+            intrinsics_var = Variable(intrinsics.cuda())
+            intrinsics_inv_var = Variable(intrinsics_inv.cuda())
+
+            flow_gt_var = Variable(flow_gt.cuda())
+            obj_map_gt_var = Variable(obj_map_gt.cuda())
 
         # compute output
         disp = disp_net(tgt_img_var)
