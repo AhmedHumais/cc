@@ -9,3 +9,6 @@ from .MaskResNet6 import MaskResNet6
 from .PoseExpNet import PoseExpNet
 from .PoseNet6 import PoseNet6
 from .PoseNetB6 import PoseNetB6
+from RAFT.core.raft import RAFT
+from monodepth2.networks.resnet_encoder import ResnetEncoder
+from monodepth2.networks.depth_decoder import DepthDecoder
