@@ -142,9 +142,9 @@ class Conv5x5(nn.Module):
         super(Conv5x5, self).__init__()
 
         if use_refl:
-            self.pad = nn.ReflectionPad2d(1)
+            self.pad = nn.ReflectionPad2d(2)
         else:
-            self.pad = nn.ZeroPad2d(1)
+            self.pad = nn.ZeroPad2d(2)
         self.conv = nn.Conv2d(int(in_channels), int(out_channels), 5)
 
     def forward(self, x):

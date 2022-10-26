@@ -7,6 +7,7 @@ from update import BasicUpdateBlock, SmallUpdateBlock
 from extractor import BasicEncoder, SmallEncoder
 from corr import CorrBlock, AlternateCorrBlock
 from utils.utils import bilinear_sampler, coords_grid, upflow8
+from utils.layers import Conv5x5
 
 try:
     autocast = torch.cuda.amp.autocast
@@ -54,6 +55,9 @@ class RAFT(nn.Module):
             self.fnet = BasicEncoder(output_dim=256, norm_fn='instance', dropout=args.dropout)        
             self.cnet = BasicEncoder(output_dim=hdim+cdim, norm_fn='batch', dropout=args.dropout)
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim)
+        
+        self.conv_gamma = Conv5x5(2, 1)
+        self.sigmoid_gamma = nn.Sigmoid()
 
     def freeze_bn(self):
         for m in self.modules():
@@ -83,7 +87,7 @@ class RAFT(nn.Module):
         return up_flow.reshape(N, 2, 8*H, 8*W)
 
 
-    def forward(self, image1, image2, iters=12, flow_init=None, upsample=True, test_mode=False):
+    def forward(self, image1, image2, iters=12, flow_init=None, upsample=True, test_mode=False, cc_mode=False):
         """ Estimate optical flow between pair of frames """
 
         image1 = 2 * (image1 / 255.0) - 1.0
@@ -137,8 +141,13 @@ class RAFT(nn.Module):
                 flow_up = self.upsample_flow(coords1 - coords0, up_mask)
             
             flow_predictions.append(flow_up)
+        
 
         if test_mode:
             return coords1 - coords0, flow_up
-            
+        
+        if cc_mode:
+            flow_uncertainty = self.sigmoid_gamma(self.conv_gamma(flow_up))
+            return flow_predictions, flow_uncertainty
+
         return flow_predictions
