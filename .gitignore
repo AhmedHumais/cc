@@ -6,6 +6,8 @@
 *.jpg
 *.png
 *.zip
+*.egg-info
+*.npz
 main.sh
 checkpoints*
 visualize/*
@@ -20,3 +22,11 @@ datasets/mnist/
 datasets/svhn/
 results/*
 pretrained/*
+models/RAFT/dist
+models/RAFT/datasets
+models/RAFT/pytorch_env
+models/RAFT/models
+models/RAFT/build
+models/RAFT/correlation.egg-info
+models/monodepth2/kitti_data
+models/monodepth2/models
