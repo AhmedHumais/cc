@@ -69,3 +69,15 @@ def save_checkpoint(save_path, dispnet_state, posenet_state, masknet_state, flow
     if is_best:
         for prefix in file_prefixes:
             shutil.copyfile(save_path/'{}_{}'.format(prefix,filename), save_path/'{}_model_best.pth.tar'.format(prefix))
+
+def save_checkpoint_mono(save_path, dispnet, posenet_state, flownet_state, optimizer_state, is_best, filename='checkpoint.pth.tar'):
+    dispnet.save_model(save_path/'mono_checkpoint')
+    file_prefixes = ['posenet', 'flownet', 'optimizer']
+    states = [posenet_state, flownet_state, optimizer_state]
+    for (prefix, state) in zip(file_prefixes, states):
+        torch.save(state, save_path/'{}_{}'.format(prefix,filename))
+
+    if is_best:
+        for prefix in file_prefixes:
+            shutil.copyfile(save_path/'{}_{}'.format(prefix,filename), save_path/'{}_model_best.pth.tar'.format(prefix))
+        shutil.copytree(save_path/'mono_checkpoint', save_path/'mono_model_best')

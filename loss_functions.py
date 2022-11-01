@@ -465,3 +465,99 @@ def compute_errors(gt, pred, crop=True):
         sq_rel += torch.mean(((valid_gt - valid_pred)**2) / valid_gt)
 
     return [metric / batch_size for metric in [abs_diff, abs_rel, sq_rel, a1, a2, a3]]
+
+
+def compute_reprojection_loss(self, pred, target):
+    """Computes reprojection loss between a batch of predicted and target images
+    """
+    abs_diff = torch.abs(target - pred)
+    l1_loss = abs_diff.mean(1, True)
+
+    ssim_loss = ssim(pred, target).mean(1, True)
+    reprojection_loss = 0.85 * ssim_loss + 0.15 * l1_loss
+
+    return reprojection_loss
+
+def get_smooth_loss(disp, img):
+    """Computes the smoothness loss for a disparity image
+    The color image is used for edge-aware smoothness
+    """
+    grad_disp_x = torch.abs(disp[:, :, :, :-1] - disp[:, :, :, 1:])
+    grad_disp_y = torch.abs(disp[:, :, :-1, :] - disp[:, :, 1:, :])
+
+    grad_img_x = torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]), 1, keepdim=True)
+    grad_img_y = torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :]), 1, keepdim=True)
+
+    grad_disp_x *= torch.exp(-grad_img_x)
+    grad_disp_y *= torch.exp(-grad_img_y)
+
+    return grad_disp_x.mean() + grad_disp_y.mean()
+
+def monodepth_loss(tgt_img, outputs, mask):
+    scales = [0, 1, 2, 3]
+    num_scales = len(scales)
+    losses = {}
+    total_loss = 0
+    _, _, h, w = mask.size()
+    for scale in scales:
+        loss = 0
+        reprojection_losses = []
+
+        disp = outputs[("disp", scale)]
+        
+        
+        color = nn.functional.adaptive_avg_pool2d(tgt_img, (h / (2*(scale+1)), w / (2*(scale+1))))
+        target = tgt_img
+        frame_ids = [0, -1, 1]
+        for frame_id in frame_ids[1:]:
+            pred = outputs[("color", frame_id, scale)]
+            reprojection_losses.append(compute_reprojection_loss(pred, target))
+
+        reprojection_losses = compute_reprojection_loss(pred, target)
+
+
+        mask = outputs["predictive_mask"][("disp", scale)]
+
+        reprojection_losses *= mask
+
+        # add a loss pushing mask to 1 (using nn.BCELoss for stability)
+        weighting_loss = 0.2 * nn.BCELoss()(mask, torch.ones(mask.shape).cuda())
+        loss += weighting_loss.mean()
+
+        # if self.opt.avg_reprojection:
+        #     reprojection_loss = reprojection_losses.mean(1, keepdim=True)
+        # else:
+        reprojection_loss = reprojection_losses
+
+        # if not self.opt.disable_automasking:
+        #     # add random numbers to break ties
+        #     identity_reprojection_loss += torch.randn(
+        #         identity_reprojection_loss.shape, device=self.device) * 0.00001
+
+        #     combined = torch.cat((identity_reprojection_loss, reprojection_loss), dim=1)
+        # else:
+        combined = reprojection_loss
+
+        if combined.shape[1] == 1:
+            to_optimise = combined
+        else:
+            to_optimise, idxs = torch.min(combined, dim=1)
+
+        # if not self.opt.disable_automasking:
+        #     outputs["identity_selection/{}".format(scale)] = (
+        #         idxs > identity_reprojection_loss.shape[1] - 1).float()
+
+        loss += to_optimise.mean()
+
+        mean_disp = disp.mean(2, True).mean(3, True)
+        norm_disp = disp / (mean_disp + 1e-7)
+        smooth_loss = get_smooth_loss(norm_disp, color)
+
+        disparity_smoothness = 1e-3
+        loss += disparity_smoothness * smooth_loss / (2 ** scale)
+        total_loss += loss
+        losses["loss/{}".format(scale)] = loss
+
+    total_loss /= num_scales
+    losses["loss"] = total_loss
+    return losses

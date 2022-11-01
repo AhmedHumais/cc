@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.utils.data
 import custom_transforms
 import models
-from utils import tensor2array, save_checkpoint
+from utils import tensor2array, save_checkpoint, save_checkpoint_mono
 from inverse_warp import inverse_warp, pose2flow, flow2oob, flow_warp
 from loss_functions import compute_joint_mask_for_depth
 from loss_functions import consensus_exp_masks, consensus_depth_flow_mask, explainability_loss, gaussian_explainability_loss, smooth_loss, edge_aware_smoothness_loss
@@ -241,13 +241,25 @@ def main():
 
     # create model
     print("=> creating model")
+    
+    if args.dispnet=='monodepth':
+        print("==> Loading monodepth v2")
+        options = models.MonodepthOptions()
+        opts = options.parse()
+        if not args.pretrained_disp :
+            opts.weights_init="scratch"
+        else:
+            opts.load_weights_folder = args.pretrained_disp
 
-    disp_net = getattr(models, args.dispnet)().cuda()
-    output_exp = True #args.mask_loss_weight > 0
-    if not output_exp:
-        print("=> no mask loss, PoseExpnet will only output pose")
+        disp_net = models.MonoDepthv2(opts)
+    else:        
+        disp_net = getattr(models, args.dispnet)().cuda()
+        output_exp = True #args.mask_loss_weight > 0
+        if not output_exp:
+            print("=> no mask loss, PoseExpnet will only output pose")
+        mask_net = getattr(models, args.masknet)(nb_ref_imgs=args.sequence_length - 1, output_exp=True).cuda()
+    
     pose_net = getattr(models, args.posenet)(nb_ref_imgs=args.sequence_length - 1).cuda()
-    mask_net = getattr(models, args.masknet)(nb_ref_imgs=args.sequence_length - 1, output_exp=True).cuda()
 
     if args.flownet=='SpyNet':
         flow_net = getattr(models, args.flownet)(nlevels=args.nlevels, pre_normalization=normalize).cuda()
@@ -261,20 +273,25 @@ def main():
     else:
         pose_net.init_weights()
 
-    if args.pretrained_mask:
-        print("=> using pre-trained weights for explainabilty and pose net")
-        weights = torch.load(args.pretrained_mask)
-        mask_net.load_state_dict(weights['state_dict'])
-    else:
-        mask_net.init_weights()
+    if not args.disp_net=='monodepth':
+        if args.pretrained_mask:
+            print("=> using pre-trained weights for explainabilty and pose net")
+            weights = torch.load(args.pretrained_mask)
+            mask_net.load_state_dict(weights['state_dict'])
+        else:
+            mask_net.init_weights()
 
     # import ipdb; ipdb.set_trace()
     if args.pretrained_disp:
         print("=> using pre-trained weights from {}".format(args.pretrained_disp))
-        weights = torch.load(args.pretrained_disp)
-        disp_net.load_state_dict(weights['state_dict'])
+        if args.dispnet=='monodepth':
+            disp_net.load_model()
+        else:
+            weights = torch.load(args.pretrained_disp)
+            disp_net.load_state_dict(weights['state_dict'])
     else:
-        disp_net.init_weights()
+        if not args.disp_net=='monodepth':
+            disp_net.init_weights()
 
     if args.pretrained_flow:
         print("=> using pre-trained weights for FlowNet")
@@ -285,26 +302,36 @@ def main():
 
     if args.resume:
         print("=> resuming from checkpoint")
-        dispnet_weights = torch.load(args.save_path/'dispnet_checkpoint.pth.tar')
+        if args.disp_net=='monodepth':
+            disp_net.opt.load_weights_folder=args.save_path/'mono_checkpoint'
+            disp_net.load_model()
+        else:            
+            dispnet_weights = torch.load(args.save_path/'dispnet_checkpoint.pth.tar')
+            disp_net.load_state_dict(dispnet_weights['state_dict'])
+            masknet_weights = torch.load(args.save_path/'masknet_checkpoint.pth.tar')
+            mask_net.load_state_dict(masknet_weights['state_dict'])
+
         posenet_weights = torch.load(args.save_path/'posenet_checkpoint.pth.tar')
-        masknet_weights = torch.load(args.save_path/'masknet_checkpoint.pth.tar')
         flownet_weights = torch.load(args.save_path/'flownet_checkpoint.pth.tar')
-        disp_net.load_state_dict(dispnet_weights['state_dict'])
         pose_net.load_state_dict(posenet_weights['state_dict'])
         flow_net.load_state_dict(flownet_weights['state_dict'])
-        mask_net.load_state_dict(masknet_weights['state_dict'])
 
 
     # import ipdb; ipdb.set_trace()
     cudnn.benchmark = True
-    disp_net = torch.nn.DataParallel(disp_net)
-    pose_net = torch.nn.DataParallel(pose_net)
-    mask_net = torch.nn.DataParallel(mask_net)
-    flow_net = torch.nn.DataParallel(flow_net)
+    # disp_net = torch.nn.DataParallel(disp_net)
+    # mask_net = torch.nn.DataParallel(mask_net)
+    # pose_net = torch.nn.DataParallel(pose_net)
+    # flow_net = torch.nn.DataParallel(flow_net)
 
     print('=> setting adam solver')
-
-    parameters = chain(disp_net.parameters(), pose_net.parameters(), mask_net.parameters(), flow_net.parameters())
+    # for mono depth use parameters_to_train
+    
+    if args.disp_net=='monodepth':
+        parameters = chain(disp_net.parameters_to_train, pose_net.parameters(), mask_net.parameters(), flow_net.parameters())
+    else:       
+        parameters = chain(disp_net.parameters(), pose_net.parameters(), mask_net.parameters(), flow_net.parameters())
+    
     optimizer = torch.optim.Adam(parameters, args.lr,
                                  betas=(args.momentum, args.beta),
                                  weight_decay=args.weight_decay)
@@ -342,8 +369,12 @@ def main():
                 fparams.requires_grad = False
 
         if args.fix_dispnet:
-            for fparams in disp_net.parameters():
-                fparams.requires_grad = False
+            if args.disp_net=='monodepth':
+                for fparams in disp_net.parameters_to_train:
+                    fparams.requires_grad = False
+            else:
+                for fparams in disp_net.parameters():
+                    fparams.requires_grad = False
 
         if args.log_terminal:
             logger.epoch_bar.update(epoch)
@@ -393,16 +424,11 @@ def main():
         # remember lowest error and save checkpoint
         is_best = decisive_error <= best_error
         best_error = min(best_error, decisive_error)
-        save_checkpoint(
-            args.save_path, {
-                'epoch': epoch + 1,
-                'state_dict': disp_net.module.state_dict()
-            }, {
+        if args.disp_net=='monodepth':
+            save_checkpoint_mono(
+            args.save_path, disp_net, {
                 'epoch': epoch + 1,
                 'state_dict': pose_net.module.state_dict()
-            }, {
-                'epoch': epoch + 1,
-                'state_dict': mask_net.module.state_dict()
             }, {
                 'epoch': epoch + 1,
                 'state_dict': flow_net.module.state_dict()
@@ -411,6 +437,25 @@ def main():
                 'state_dict': optimizer.state_dict()
             },
             is_best)
+        else:            
+            save_checkpoint(
+                args.save_path, {
+                    'epoch': epoch + 1,
+                    'state_dict': disp_net.module.state_dict()
+                }, {
+                    'epoch': epoch + 1,
+                    'state_dict': pose_net.module.state_dict()
+                }, {
+                    'epoch': epoch + 1,
+                    'state_dict': mask_net.module.state_dict()
+                }, {
+                    'epoch': epoch + 1,
+                    'state_dict': flow_net.module.state_dict()
+                }, {
+                    'epoch': epoch + 1,
+                    'state_dict': optimizer.state_dict()
+                },
+                is_best)
 
         with open(args.save_path/args.log_summary, 'a') as csvfile:
             writer = csv.writer(csvfile, delimiter='\t')
@@ -435,9 +480,12 @@ def train(train_loader, disp_net, pose_net, mask_net, flow_net, optimizer, epoch
         loss_flow = photometric_flow_loss
 
     # switch to train mode
-    disp_net.train()
+    if args.disp_net=='monodepth':
+        disp_net.set_train()
+    else:        
+        disp_net.train()
+        mask_net.train()
     pose_net.train()
-    mask_net.train()
     flow_net.train()
 
     end = time.time()
@@ -451,13 +499,17 @@ def train(train_loader, disp_net, pose_net, mask_net, flow_net, optimizer, epoch
         intrinsics_inv_var = Variable(intrinsics_inv.cuda())
 
         # compute output
-        disparities = disp_net(tgt_img_var)
-        if args.spatial_normalize:
-            disparities = [spatial_normalize(disp) for disp in disparities]
+        if args.disp_net=='monodepth':
+            disparities, depth, explainability_mask = disp_net.process_img(tgt_img_var)
+        else:            
+            disparities = disp_net(tgt_img_var)
+            if args.spatial_normalize:
+                disparities = [spatial_normalize(disp) for disp in disparities]
 
-        depth = [1/disp for disp in disparities]
+            depth = [1/disp for disp in disparities]
+            explainability_mask = mask_net(tgt_img_var, ref_imgs_var)
+
         pose = pose_net(tgt_img_var, ref_imgs_var)
-        explainability_mask = mask_net(tgt_img_var, ref_imgs_var)
 
         if args.flownet == 'Back2Future':
             flow_fwd, flow_bwd, _ = flow_net(tgt_img_var, ref_imgs_var[1:3])
